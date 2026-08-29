@@ -27,18 +27,7 @@ chat.post('/v1/chat/completions', async (c) => {
 
   try {
     const qwenRes = await generateCompletion(model, messages, stream, config.token);
-
-    if (!stream) {
-      const data = await qwenRes.json();
-      return c.json(data);
-    } 
-    
-    // Pass-through SSE
-    c.header('Content-Type', 'text/event-stream');
-    c.header('Cache-Control', 'no-cache');
-    c.header('Connection', 'keep-alive');
-    return c.body(qwenRes.body);
-
+    return qwenRes;
   } catch (error: any) {
     return c.json({ error: { message: error.message || 'Unknown error' } }, 500);
   }

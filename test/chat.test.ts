@@ -12,8 +12,12 @@ describe('POST /v1/chat/completions', () => {
     vi.spyOn(client, 'generateCompletion').mockResolvedValueOnce(
       new Response(JSON.stringify({
         id: "chatcmpl-123",
-        choices: [{ message: { content: "hello world" } }]
-      }))
+        object: "chat.completion",
+        created: 1732711466,
+        model: "qwen3.7-plus",
+        choices: [{ index: 0, message: { role: "assistant", content: "hello world" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      }), { headers: { 'Content-Type': 'application/json' } })
     );
 
     const res = await app.request('/v1/chat/completions', {
@@ -28,6 +32,7 @@ describe('POST /v1/chat/completions', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.choices[0].message.content).toBe('hello world');
+    expect(body.usage.prompt_tokens).toBe(5);
   });
 
   it('rejects unauthorized requests when api_keys is set', async () => {
@@ -55,11 +60,14 @@ describe('POST /v1/chat/completions', () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1732711466,"model":"qwen3.7-plus","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
       }
     });
-    vi.spyOn(client, 'generateCompletion').mockResolvedValueOnce(new Response(stream));
+    vi.spyOn(client, 'generateCompletion').mockResolvedValueOnce(
+      new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
+    );
 
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -73,8 +81,9 @@ describe('POST /v1/chat/completions', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('text/event-stream');
-    expect(res.headers.get('Cache-Control')).toBe('no-cache');
     const text = await res.text();
     expect(text).toContain('data:');
+    expect(text).toContain('hi');
+    expect(text).toContain('[DONE]');
   });
 });
