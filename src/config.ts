@@ -30,7 +30,13 @@ export function getConfig(): Config {
   }
   
   const token = process.env.QWEN_TOKEN || jsonConfig.token || null;
-  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : (jsonConfig.port || DEFAULT_CONFIG.port);
+  let port = jsonConfig.port || DEFAULT_CONFIG.port;
+  if (process.env.PORT) {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!Number.isNaN(parsed)) {
+      port = parsed;
+    }
+  }
   const api_keys = jsonConfig.api_keys || DEFAULT_CONFIG.api_keys;
 
   return { port, token, api_keys };

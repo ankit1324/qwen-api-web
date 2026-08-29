@@ -22,4 +22,13 @@ describe('Qwen Client', () => {
     expect(body.model).toBe("qwen3.7-plus");
     expect(body.messages[0].content).toBe("hey");
   });
+
+  it('throws with Upstream error on non-ok response', async () => {
+    const mockFetch = vi.mocked(global.fetch);
+    mockFetch.mockResolvedValueOnce(new Response("bad request", { status: 400 }));
+
+    await expect(
+      generateCompletion("qwen3.7-plus", [{ role: "user", content: "hey" }], false, "fake-token")
+    ).rejects.toThrow(/Upstream error/);
+  });
 });

@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { streamSSE } from 'hono/streaming';
 import { getConfig } from '../config';
 import { generateCompletion } from '../qwen/client';
 
