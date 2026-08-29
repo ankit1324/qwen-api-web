@@ -1,0 +1,5 @@
+{
+  "port": 8081,
+  "token": "YOUR_QWEN_LOCALSTORAGE_TOKEN_HERE",
+  "api_keys": []
+}
