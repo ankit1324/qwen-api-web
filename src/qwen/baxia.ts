@@ -181,7 +181,12 @@ export async function getBaxiaTokens(forceRefresh = false): Promise<BaxiaTokens>
   if (!forceRefresh && cache && (now - cacheTime) < CACHE_TTL) {
     return cache;
   }
-  let tokens = await getBaxiaTokensFromChrome();
+  let tokens: BaxiaTokens | null = null;
+  try {
+    tokens = await getBaxiaTokensFromChrome();
+  } catch {
+    tokens = null;
+  }
   if (!tokens) {
     tokens = await getBaxiaTokensFallback();
   }

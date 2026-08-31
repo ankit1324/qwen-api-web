@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { getBaxiaTokens, type BaxiaTokens } from './baxia';
+import { logHeader, logPrompt, logLive, logFooter, logError, dim } from '../logger';
 
 const QWEN_BASE_URL = 'https://chat.qwen.ai';
 const WEB_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
@@ -104,6 +105,60 @@ function extractReasoning(delta: any): string {
   return '';
 }
 
+class ThinkStripper {
+  private buf = '';
+  private inThink = false;
+  private static OPEN = '<think>';
+  private static CLOSE = '</think>';
+
+  private safeLen(tag: string): number {
+    const max = Math.min(this.buf.length, tag.length - 1);
+    for (let k = max; k > 0; k--) {
+      if (this.buf.endsWith(tag.slice(0, k))) return this.buf.length - k;
+    }
+    return this.buf.length;
+  }
+
+  feed(chunk: string): { visible: string; reasoning: string } {
+    this.buf += chunk;
+    let visible = '';
+    let reasoning = '';
+    while (this.buf) {
+      if (!this.inThink) {
+        const i = this.buf.indexOf(ThinkStripper.OPEN);
+        if (i === -1) {
+          const safeLen = this.safeLen(ThinkStripper.OPEN);
+          visible += this.buf.slice(0, safeLen);
+          this.buf = this.buf.slice(safeLen);
+          break;
+        }
+        visible += this.buf.slice(0, i);
+        this.buf = this.buf.slice(i + ThinkStripper.OPEN.length);
+        this.inThink = true;
+      } else {
+        const j = this.buf.indexOf(ThinkStripper.CLOSE);
+        if (j === -1) {
+          const safeLen = this.safeLen(ThinkStripper.CLOSE);
+          reasoning += this.buf.slice(0, safeLen);
+          this.buf = this.buf.slice(safeLen);
+          break;
+        }
+        reasoning += this.buf.slice(0, j);
+        this.buf = this.buf.slice(j + ThinkStripper.CLOSE.length);
+        this.inThink = false;
+      }
+    }
+    return { visible, reasoning };
+  }
+
+  /** Flush at end of stream. Unclosed <think> content is treated as reasoning, never leaked as visible text. */
+  flush(): { visible: string; reasoning: string } {
+    const out = this.inThink ? { visible: '', reasoning: this.buf } : { visible: this.buf, reasoning: '' };
+    this.buf = '';
+    return out;
+  }
+}
+
 interface SseEvent { delta: any; finish_reason: string | null; usage: any; }
 
 function parseSseEvents(payload: string): SseEvent[] {
@@ -131,8 +186,10 @@ function mapUsage(usage: any): any {
   return { prompt_tokens: it, completion_tokens: ot, total_tokens: Number(usage?.total_tokens || (it + ot)) };
 }
 
-function openaiChunk(id: string, created: number, model: string, delta: any, finish: string | null): string {
-  return `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: delta || {}, finish_reason: finish }]})}\n\n`;
+function openaiChunk(id: string, created: number, model: string, delta: any, finish: string | null, usage: any = null): string {
+  const payload: any = { id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: delta || {}, finish_reason: finish }] };
+  if (usage) payload.usage = mapUsage(usage);
+  return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
 interface AttemptConfig { mode: ChatMode; token: string | null; }
@@ -154,6 +211,8 @@ export async function generateCompletion(model: string, messages: any[], stream:
       try {
         const chatId = await createChatSession(tokens, actualModel, chatType, cfg.mode, cfg.token);
         const content = parseIncomingMessages(messages);
+        logHeader(`→ ${actualModel} ${dim(`(${cfg.mode} mode, stream=${stream})`)}`);
+        logPrompt(content);
 
         const resp = await fetch(`${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`, {
           method: 'POST',
@@ -178,9 +237,24 @@ export async function generateCompletion(model: string, messages: any[], stream:
         if (!stream) {
           const text = await resp.text();
           const events = parseSseEvents(text);
-          const contentParts = events.map(e => e.delta?.content || '').filter(Boolean);
-          const reasoningParts = events.map(e => e.delta?.reasoning_content || '').filter(Boolean);
+          const stripper = new ThinkStripper();
+          const contentParts: string[] = [];
+          const reasoningParts: string[] = [];
+          for (const e of events) {
+            if (e.delta?.reasoning_content) reasoningParts.push(e.delta.reasoning_content);
+            if (e.delta?.content) {
+              const { visible, reasoning } = stripper.feed(e.delta.content);
+              if (visible) contentParts.push(visible);
+              if (reasoning) reasoningParts.push(reasoning);
+            }
+          }
+          const tail = stripper.flush();
+          if (tail.visible) contentParts.push(tail.visible);
+          if (tail.reasoning) reasoningParts.push(tail.reasoning);
           const usageEvent = [...events].reverse().find(e => e.usage)?.usage || null;
+          if (reasoningParts.length > 0) logLive(reasoningParts.join('\n'), 'reasoning');
+          logLive(contentParts.join(''));
+          logFooter('done', `tokens: ${usageEvent?.input_tokens || 0} in / ${usageEvent?.output_tokens || 0} out`);
           return new Response(JSON.stringify({
             id: responseId, object: 'chat.completion', created, model: actualModel,
             choices: [{ index: 0, message: { role: 'assistant', content: contentParts.join(''), ...(reasoningParts.length > 0 ? { reasoning_content: reasoningParts.join('\n') } : {}) }, finish_reason: 'stop' }],
@@ -192,11 +266,14 @@ export async function generateCompletion(model: string, messages: any[], stream:
         const encoder = new TextEncoder();
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
+        let totalIn = 0, totalOut = 0;
 
         const readable = new ReadableStream<Uint8Array>({
           async start(controller) {
             let buffer = '';
             let finished = false;
+            let lastUsage: any = null;
+            const stripper = new ThinkStripper();
             try {
               while (true) {
                 const { done, value } = await reader.read();
@@ -213,8 +290,22 @@ export async function generateCompletion(model: string, messages: any[], stream:
                   try {
                     const parsed = JSON.parse(data);
                     const ud = parsed?.choices?.[0]?.delta;
-                    const delta = mapUpstreamDelta(ud);
+                    let delta = mapUpstreamDelta(ud);
                     const fr = parsed?.choices?.[0]?.finish_reason || null;
+                    if (parsed?.usage) {
+                      lastUsage = parsed.usage;
+                      totalIn = parsed.usage.input_tokens || totalIn;
+                      totalOut = parsed.usage.output_tokens || totalOut;
+                    }
+                    if (delta?.content) {
+                      const { visible, reasoning } = stripper.feed(delta.content);
+                      const merged: any = { ...delta };
+                      if (visible) merged.content = visible; else delete merged.content;
+                      if (reasoning) merged.reasoning_content = [merged.reasoning_content, reasoning].filter(Boolean).join('\n');
+                      delta = Object.keys(merged).length > 0 ? merged : null;
+                    }
+                    if (delta?.reasoning_content) logLive(delta.reasoning_content, 'reasoning');
+                    if (delta?.content) logLive(delta.content);
                     if (delta || fr) {
                       controller.enqueue(encoder.encode(openaiChunk(responseId, created, actualModel, delta || {}, fr)));
                       if (fr) finished = true;
@@ -222,14 +313,23 @@ export async function generateCompletion(model: string, messages: any[], stream:
                   } catch { }
                 }
               }
+              const tail = stripper.flush();
+              if (tail.visible || tail.reasoning) {
+                const tailDelta: any = {};
+                if (tail.visible) { tailDelta.content = tail.visible; logLive(tail.visible); }
+                if (tail.reasoning) { tailDelta.reasoning_content = tail.reasoning; logLive(tail.reasoning, 'reasoning'); }
+                controller.enqueue(encoder.encode(openaiChunk(responseId, created, actualModel, tailDelta, null)));
+              }
               if (!finished) {
-                controller.enqueue(encoder.encode(openaiChunk(responseId, created, actualModel, {}, 'stop')));
+                controller.enqueue(encoder.encode(openaiChunk(responseId, created, actualModel, {}, 'stop', lastUsage || { input_tokens: totalIn, output_tokens: totalOut })));
               }
               controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             } catch (e: any) {
+              logError(`stream: ${e?.message || e}`);
               controller.error(e);
               return;
             }
+            logFooter('done', `tokens: ${totalIn} in / ${totalOut} out`);
             controller.close();
           },
         });

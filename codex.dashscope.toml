@@ -1,0 +1,20 @@
+# Codex CLI config: talk to Alibaba DashScope directly (no local proxy needed).
+#
+# Setup, one time:
+#   1. Get an API key: https://bailian.console.alibabacloud.com/  (Model Studio -> API-KEY)
+#   2. export DASHSCOPE_API_KEY=sk-...        # add to ~/.zshrc to persist
+#   3. codex -c model_provider=dashscope -c model=qwen3-coder-plus
+#
+# Use the -intl host outside mainland China; swap to the non-intl host if your
+# account is registered on the China site (the two are separate accounts+keys).
+
+model = "qwen3-coder-plus"
+model_provider = "dashscope"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[model_providers.dashscope]
+name = "Qwen (DashScope, OpenAI-compatible)"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+wire_api = "chat"
+env_key = "DASHSCOPE_API_KEY"

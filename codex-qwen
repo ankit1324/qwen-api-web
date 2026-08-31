@@ -1,0 +1,45 @@
+#!/bin/bash
+# Launch Codex CLI using this project's local proxy (localhost:8081) as the model provider.
+# Usage:
+#   codex-qwen [codex args...]                       → default model (qwen3.8-max)
+#   codex-qwen -m qwen3.7-plus [codex args...]       → pick a model
+#   codex-qwen --list-models                          → show available models
+# Config overrides layer on top of ~/.codex/config.toml — global settings stay intact.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_MODEL="qwen3.8-max"
+MODEL="$DEFAULT_MODEL"
+
+if [ "$1" = "--list-models" ]; then
+  echo "Available models (from localhost:8081):"
+  curl -s --max-time 5 http://localhost:8081/v1/models | python3 -c "
+import sys, json
+try:
+    for m in json.load(sys.stdin)['data']:
+        print('  ' + m['id'])
+except Exception:
+    print('  (proxy not running?)')
+" 2>/dev/null || echo "  (proxy not running?)"
+  exit 0
+fi
+
+if [ "$1" = "-m" ] || [ "$1" = "--model" ]; then
+  if [ -z "$2" ]; then
+    echo "ERROR: -m/--model requires a model name. Try: codex-qwen --list-models"
+    exit 1
+  fi
+  MODEL="$2"
+  shift 2
+fi
+
+if ! curl -s -o /dev/null --max-time 2 http://localhost:8081/v1/models; then
+  echo "Proxy not running on :8081 — starting it via npm start..."
+  (cd "$SCRIPT_DIR" && npm start >/tmp/qwen-api-web.log 2>&1 &)
+  sleep 3
+fi
+
+exec codex \
+  -c 'model_providers.qwen={ name = "Qwen API Web (local proxy)", base_url = "http://localhost:8081/v1", wire_api = "responses", env_key = "QWEN_API_KEY" }' \
+  -c model_provider=qwen \
+  -c model="$MODEL" \
+  "$@"

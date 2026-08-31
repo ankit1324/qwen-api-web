@@ -1,0 +1,15 @@
+# Codex CLI configuration for using this project (qwen-api-web) as the model provider.
+# Layers on top of ~/.codex/config.toml — global settings (plugins, hooks, trust) stay intact.
+# Usage: ./codex-qwen
+#   or:  codex -c model_provider=qwen -c model=qwen3.7-plus
+
+model = "qwen3.7-plus"
+model_provider = "qwen"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[model_providers.qwen]
+name = "Qwen API Web (local proxy)"
+base_url = "http://localhost:8081/v1"
+wire_api = "responses"
+env_key = "QWEN_API_KEY"
